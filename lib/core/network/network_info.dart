@@ -16,7 +16,11 @@ class NetworkInfoImpl implements NetworkInfo {
     return result != ConnectivityResult.none;
   }
 
-  @override
   Stream<ConnectivityResult> get onConnectivityChanged =>
-      connectivity.onConnectivityChanged;
+      connectivity.onConnectivityChanged.map(
+            (results) =>
+        results.any((r) => r != ConnectivityResult.none)
+            ? ConnectivityResult.wifi // or ConnectivityResult.other
+            : ConnectivityResult.none,
+      );
 }
