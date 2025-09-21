@@ -1,0 +1,13 @@
+import 'package:dartz/dartz.dart';
+import '../../../../core/errors/failures.dart';
+import '../../domain/entities/user.dart';
+
+abstract class AuthRepository {
+  Future<Either<Failure, User>> login(String email, String password);
+  Future<Either<Failure, User>> signup(String email, String password, String? displayName);
+  Future<Either<Failure, void>> logout();
+  Future<Either<Failure, User>> getCurrentUser();
+  Future<Either<Failure, User>> signInWithGoogle();
+  Future<Either<Failure, void>> sendPasswordResetEmail(String email);
+  Future<Either<Failure, void>> verifyEmail();
+}
