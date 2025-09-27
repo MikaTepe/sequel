@@ -223,7 +223,6 @@ celerybeat.pid
 
 # dotenv
 *.env
-*.env.*
 
 # mypy
 .mypy_cache/
