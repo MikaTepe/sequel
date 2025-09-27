@@ -40,7 +40,7 @@ linked_*.ds
 unlinked.ds
 unlinked_spec.ds
 **/generated_plugin_registrant.dart
-apps/flutter/.flutter-plugins-dependencies
+apps/SequelApp/.flutter-plugins-dependencies
 flutter_*.png
 
 # Flutter repo-specific
