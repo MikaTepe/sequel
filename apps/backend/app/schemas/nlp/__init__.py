@@ -8,7 +8,6 @@ from .keybert import (
     BatchKeywordRequest,
     BatchKeywordResponse,
     ServiceHealthResponse,
-    ServiceInfoResponse
 )
 
 __all__ = [
@@ -17,5 +16,4 @@ __all__ = [
     "BatchKeywordRequest",
     "BatchKeywordResponse",
     "ServiceHealthResponse",
-    "ServiceInfoResponse"
 ]

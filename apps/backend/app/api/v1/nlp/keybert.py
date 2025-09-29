@@ -1,177 +1,61 @@
-from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
-from fastapi.responses import JSONResponse
-from typing import List, Dict, Any
+"""KeyBERT API Endpoints"""
+
+from fastapi import APIRouter, HTTPException, Depends, status
 import logging
-import time
 
 from ....schemas.nlp.keybert import (
     KeywordExtractionRequest,
     KeywordExtractionResponse,
     BatchKeywordRequest,
     BatchKeywordResponse,
-    ServiceHealthResponse,
-    ServiceInfoResponse,
-    ErrorResponse,
-    BatchResultItem,
-    ProcessingMetadata
+    ServiceHealthResponse
 )
 from ....services.nlp.keybert_service import keybert_service
 from ....core.exceptions import (
-    KeywordExtractionException,
     ModelNotLoadedException,
     UnsupportedLanguageException,
     TextTooShortException,
     TextTooLongException,
-    BatchSizeExceededException,
-    format_exception_details
+    BatchSizeExceededException
 )
-from ....core.config import get_settings
 
 logger = logging.getLogger(__name__)
-settings = get_settings()
 
-# Router für KeyBERT-Endpoints
-router = APIRouter(
-    prefix="/keybert",
-    tags=["keybert", "nlp", "keyword-extraction"],
-    responses={
-        500: {"model": ErrorResponse, "description": "Internal Server Error"},
-        503: {"model": ErrorResponse, "description": "Service Unavailable"},
-        422: {"description": "Validation Error"}
-    }
-)
+router = APIRouter(prefix="/keybert", tags=["keybert"])
 
 
-# Dependency für Service-Verfügbarkeit
-async def get_keybert_service():
-    """
-    Dependency to ensure KeyBERT service is available
-
-    Raises:
-        HTTPException: If service not initialized
-    """
+def get_keybert_service():
+    """Dependency for service availability"""
     if not keybert_service.is_initialized():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="KeyBERT service is not initialized. Please try again later."
+            detail="KeyBERT service not initialized"
         )
     return keybert_service
 
 
-@router.get(
-    "/health",
-    response_model=ServiceHealthResponse,
-    summary="KeyBERT Service Health Check",
-    description="Check the health status and availability of the KeyBERT service"
-)
+@router.get("/health", response_model=ServiceHealthResponse)
 async def health_check():
-    """
-    Health check endpoint for KeyBERT service
+    """Service health check"""
+    service_info = await keybert_service.get_service_info()
 
-    Returns service status, initialization state, and basic metrics.
-    """
-    try:
-        service_info = await keybert_service.get_service_info()
-
-        return ServiceHealthResponse(
-            status="healthy" if service_info["initialized"] else "initializing",
-            initialized=service_info["initialized"],
-            supported_languages=service_info["supported_languages"],
-            models_loaded=service_info["models_loaded"],
-            version=service_info.get("version", "1.0.0"),
-            uptime_seconds=service_info.get("uptime_seconds"),
-            memory_usage_mb=service_info.get("memory_usage_mb")
-        )
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return ServiceHealthResponse(
-            status="unhealthy",
-            initialized=False,
-            supported_languages=[],
-            models_loaded=0,
-            version="unknown"
-        )
+    return ServiceHealthResponse(
+        status="healthy" if service_info["initialized"] else "initializing",
+        initialized=service_info["initialized"],
+        supported_languages=service_info["supported_languages"],
+        models_loaded=service_info["models_loaded"],
+        version=service_info["version"]
+    )
 
 
-@router.get(
-    "/info",
-    response_model=ServiceInfoResponse,
-    summary="KeyBERT Service Information",
-    description="Get detailed information about the KeyBERT service capabilities and configuration"
-)
-async def get_service_info():
-    """
-    Get comprehensive service information
-
-    Returns detailed information about models, capabilities, and configuration.
-    """
-    try:
-        service_info = await keybert_service.get_service_info()
-
-        return ServiceInfoResponse(
-            service_name=service_info["service_name"],
-            version=service_info.get("version", "1.0.0"),
-            description="AI-powered keyword extraction from German and English texts using state-of-the-art transformer models",
-            supported_languages=service_info["supported_languages"],
-            capabilities=[
-                "single_text_extraction",
-                "batch_processing",
-                "multilingual_support",
-                "customizable_ngrams",
-                "diversity_control",
-                "parallel_processing",
-                "metadata_inclusion"
-            ],
-            model_info=service_info.get("model_info", {}),
-            configuration=service_info.get("configuration", {})
-        )
-    except Exception as e:
-        logger.error(f"Failed to get service info: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve service information"
-        )
-
-
-@router.post(
-    "/extract",
-    response_model=KeywordExtractionResponse,
-    summary="Extract Keywords",
-    description="Extract keywords from a single text using AI-powered analysis",
-    responses={
-        200: {"description": "Keywords successfully extracted"},
-        400: {"model": ErrorResponse, "description": "Invalid request"},
-        503: {"model": ErrorResponse, "description": "Service unavailable"}
-    }
-)
+@router.post("/extract", response_model=KeywordExtractionResponse)
 async def extract_keywords(
         request: KeywordExtractionRequest,
-        service: keybert_service.__class__ = Depends(get_keybert_service),
-        # current_user: User = Depends(get_current_user)  # Authentication wenn benötigt
+        service: keybert_service.__class__ = Depends(get_keybert_service)
 ):
-    """
-    Extract keywords from a text
-
-    This endpoint analyzes the provided text and extracts the most relevant keywords
-    using advanced transformer models optimized for the specified language.
-
-    **Parameters:**
-    - **text**: The text to analyze (minimum 10 characters, maximum 50,000)
-    - **language**: Language of the text (de for German, en for English)
-    - **max_keywords**: Maximum number of keywords to return (1-50)
-    - **min_ngram/max_ngram**: N-gram range for keyword phrases
-    - **diversity**: Keyword diversity factor (0.0 = similar, 1.0 = diverse)
-    - **use_mmr**: Use Maximal Marginal Relevance for better diversity
-    - **include_metadata**: Include processing metadata in response
-
-    **Returns:**
-    List of keywords with relevance scores and optional metadata.
-    """
-
-    start_time = time.time()
+    """Extract keywords from text"""
 
     try:
-        # Extract keywords using service
         keywords, metadata = await service.extract_keywords(
             text=request.text,
             language=request.language.value,
@@ -183,9 +67,6 @@ async def extract_keywords(
             include_metadata=request.include_metadata
         )
 
-        processing_time = time.time() - start_time
-
-        # Create response
         return KeywordExtractionResponse(
             keywords=keywords,
             language=request.language,
@@ -196,230 +77,108 @@ async def extract_keywords(
 
     except (ModelNotLoadedException, UnsupportedLanguageException,
             TextTooShortException, TextTooLongException) as e:
-        logger.warning(f"Validation error in keyword extraction: {e}")
-        error_details = format_exception_details(e)
         raise HTTPException(
-            status_code=error_details["status_code"],
-            detail=error_details
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
         )
-
-    except KeywordExtractionException as e:
-        logger.error(f"Keyword extraction failed: {e}")
-        error_details = format_exception_details(e)
-        raise HTTPException(
-            status_code=error_details["status_code"],
-            detail=error_details
-        )
-
     except Exception as e:
-        logger.error(f"Unexpected error in keyword extraction: {e}")
+        logger.error(f"Keyword extraction failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred during keyword extraction"
+            detail="Keyword extraction failed"
         )
 
 
-@router.post(
-    "/extract-batch",
-    response_model=BatchKeywordResponse,
-    summary="Batch Keyword Extraction",
-    description="Process multiple texts simultaneously for keyword extraction",
-    responses={
-        200: {"description": "Batch processing completed"},
-        400: {"model": ErrorResponse, "description": "Invalid batch request"},
-        503: {"model": ErrorResponse, "description": "Service unavailable"}
-    }
-)
+@router.post("/extract-batch", response_model=BatchKeywordResponse)
 async def extract_keywords_batch(
         request: BatchKeywordRequest,
-        background_tasks: BackgroundTasks,
-        service: keybert_service.__class__ = Depends(get_keybert_service),
-        # current_user: User = Depends(get_current_user)  # Authentication wenn benötigt
+        service: keybert_service.__class__ = Depends(get_keybert_service)
 ):
-    """
-    Batch keyword extraction for multiple texts
-
-    Process up to 100 texts simultaneously with optional parallel processing.
-    Each text can have individual parameters for customized extraction.
-
-    **Features:**
-    - Parallel processing for faster throughput
-    - Individual error handling per text
-    - Configurable failure behavior (fail-fast or continue)
-    - Processing statistics and timing information
-
-    **Parameters:**
-    - **texts**: List of extraction requests (max 100)
-    - **parallel_processing**: Process texts in parallel (default: true)
-    - **fail_fast**: Stop processing on first error (default: false)
-
-    **Returns:**
-    Results for all texts with success/failure status and detailed statistics.
-    """
+    """Batch keyword extraction"""
 
     if len(request.texts) == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least one text must be provided for batch processing"
+            detail="No texts provided"
         )
 
-    start_time = time.time()
-
     try:
-        # Process batch
         raw_results = await service.extract_keywords_batch(
             requests=request.texts,
             parallel_processing=request.parallel_processing,
             fail_fast=request.fail_fast
         )
 
-        # Convert results to response format
+        # Format results
         results = []
-        successful_count = 0
-        failed_count = 0
-
-        for raw_result in raw_results:
-            if raw_result["success"]:
-                # Create successful result
-                response_data = KeywordExtractionResponse(
-                    keywords=raw_result["keywords"],
-                    language=raw_result["language"],
-                    text_length=raw_result["text_length"],
-                    total_keywords_found=len(raw_result["keywords"]),
-                    processing_metadata=raw_result.get("metadata")
-                )
-
+        for result in raw_results:
+            if result["success"]:
+                from ....schemas.nlp.keybert import BatchResultItem
                 results.append(BatchResultItem(
-                    index=raw_result["index"],
+                    index=result["index"],
                     success=True,
-                    data=response_data,
-                    processing_time_ms=raw_result.get("processing_time_ms")
+                    data=KeywordExtractionResponse(
+                        keywords=result["keywords"],
+                        language=result["language"],
+                        text_length=result["text_length"],
+                        total_keywords_found=len(result["keywords"]),
+                        processing_metadata=result.get("metadata")
+                    )
                 ))
-                successful_count += 1
             else:
-                # Create error result
                 results.append(BatchResultItem(
-                    index=raw_result["index"],
+                    index=result["index"],
                     success=False,
-                    error=raw_result["error"],
-                    error_code=raw_result.get("error_code"),
-                    processing_time_ms=raw_result.get("processing_time_ms")
+                    error=result["error"],
+                    error_code=result.get("error_code")
                 ))
-                failed_count += 1
 
-        total_processing_time = time.time() - start_time
-
-        # Create summary
-        summary = {
-            "total_texts": len(request.texts),
-            "successful": successful_count,
-            "failed": failed_count,
-            "success_rate": successful_count / len(request.texts),
-            "parallel_processing": request.parallel_processing,
-            "fail_fast": request.fail_fast
-        }
-
-        # Log batch processing statistics
-        logger.info(
-            f"Batch processing completed: {successful_count}/{len(request.texts)} successful "
-            f"in {total_processing_time:.2f}s (parallel={request.parallel_processing})"
-        )
+        successful = sum(1 for r in results if r.success)
 
         return BatchKeywordResponse(
             results=results,
-            summary=summary,
-            total_processing_time_ms=round(total_processing_time * 1000, 2)
+            summary={
+                "total_texts": len(request.texts),
+                "successful": successful,
+                "failed": len(request.texts) - successful,
+                "success_rate": successful / len(request.texts)
+            }
         )
 
     except BatchSizeExceededException as e:
-        logger.warning(f"Batch size exceeded: {e}")
-        error_details = format_exception_details(e)
         raise HTTPException(
-            status_code=error_details["status_code"],
-            detail=error_details
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
         )
-
     except Exception as e:
         logger.error(f"Batch processing failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Batch processing failed: {str(e)}"
+            detail="Batch processing failed"
         )
 
 
-@router.get(
-    "/languages",
-    summary="Supported Languages",
-    description="Get information about supported languages and their capabilities"
-)
+@router.get("/languages")
 async def get_supported_languages():
-    """
-    Get supported languages and model information
+    """Get supported languages"""
+    service_info = await keybert_service.get_service_info()
 
-    Returns detailed information about each supported language including
-    the transformer model used and its capabilities.
-    """
-    try:
-        service_info = await keybert_service.get_service_info()
-
-        return {
-            "supported_languages": service_info["supported_languages"],
-            "language_details": {
-                "de": {
-                    "name": "Deutsch",
-                    "description": "German language support with multilingual transformer model",
-                    "model": settings.keybert_de_model,
-                    "capabilities": ["keyword_extraction", "phrase_extraction", "multilingual_content"]
-                },
-                "en": {
-                    "name": "English",
-                    "description": "English language support with optimized transformer model",
-                    "model": settings.keybert_en_model,
-                    "capabilities": ["keyword_extraction", "phrase_extraction", "high_performance"]
-                }
-            },
-            "model_info": service_info.get("model_info", {}),
-            "configuration": {
-                "max_batch_size": settings.keybert_max_batch_size,
-                "device": settings.keybert_device,
-                "cache_ttl": settings.keybert_cache_ttl
-            }
+    return {
+        "supported_languages": service_info["supported_languages"],
+        "model_info": {
+            "de": settings.keybert_de_model,
+            "en": settings.keybert_en_model
         }
-    except Exception as e:
-        logger.error(f"Failed to get language information: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve language information"
-        )
+    }
 
 
-@router.get(
-    "/statistics",
-    summary="Service Statistics",
-    description="Get usage statistics and performance metrics"
-)
-async def get_service_statistics(
-        service: keybert_service.__class__ = Depends(get_keybert_service)
-):
-    """
-    Get service usage statistics and performance metrics
+@router.get("/statistics")
+async def get_statistics(service: keybert_service.__class__ = Depends(get_keybert_service)):
+    """Get service statistics"""
+    service_info = await service.get_service_info()
 
-    Returns information about service usage, processing times, and performance.
-    """
-    try:
-        service_info = await service.get_service_info()
-
-        return {
-            "statistics": service_info.get("statistics", {}),
-            "uptime_seconds": service_info.get("uptime_seconds"),
-            "memory_usage_mb": service_info.get("memory_usage_mb"),
-            "models_loaded": service_info["models_loaded"],
-            "supported_languages": len(service_info["supported_languages"]),
-            "configuration": service_info.get("configuration", {})
-        }
-    except Exception as e:
-        logger.error(f"Failed to get statistics: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve service statistics"
-        )
+    return {
+        "initialized": service_info["initialized"],
+        "models_loaded": service_info["models_loaded"],
+        "configuration": service_info["configuration"]
+    }
