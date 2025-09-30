@@ -1,420 +1,296 @@
 """KeyBERT Service with Text Chunking and Sentence Extraction"""
+from __future__ import annotations
 
 import asyncio
-import logging
-from typing import List, Dict, Any, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor
-import time
-import re
+from dataclasses import dataclass
+from math import ceil
+from time import perf_counter
+from typing import Any, Dict, List, Optional, Tuple
+import inspect
 
-from keybert import KeyBERT
-from sentence_transformers import SentenceTransformer
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-
-from ...core.config import get_settings
-from ...core.exceptions import (
-    ModelNotLoadedException,
-    UnsupportedLanguageException,
-    TextTooShortException,
-    TextTooLongException
+from app.schemas.nlp.keybert import (
+    KeywordExtractionRequest,
+    KeywordExtractionResponse,
+    KeywordResult,
+    ServiceHealthResponse,
 )
-from ...schemas.nlp.keybert import KeywordResult, ProcessingMetadata
+from app.schemas.nlp.text_types import (
+    TextType,
+    TitleConfig,
+    ParamUnion,
+    BaseExtractionParams,
+    ArticleExtractionParams,
+    ScientificPaperExtractionParams,
+    BlogPostExtractionParams,
+)
 
-logger = logging.getLogger(__name__)
-settings = get_settings()
+# Optional: read settings if you want to pick a model from config
+try:
+    from app.core.config import get_settings
+except Exception:  # keep service usable even if settings is unavailable in tests
+    get_settings = None  # type: ignore
 
 
-class EnhancedKeyBERTService:
-    """Enhanced KeyBERT service with text chunking and sentence extraction"""
-    def __init__(self):
-        self._models: Dict[str, KeyBERT] = {}
-        self._sentence_models: Dict[str, SentenceTransformer] = {}
-        self._initialized = False
-        self._executor = ThreadPoolExecutor(max_workers=4)
+# ------------------------------ helpers ---------------------------------------
 
-        # Erhöhte Limits für Artikel
-        self.MAX_TEXT_LENGTH = 500000  # 500k Zeichen (~100 Seiten)
-        self.CHUNK_SIZE = 5000  # 5k Zeichen pro Chunk
-        self.CHUNK_OVERLAP = 500  # Überlappung zwischen Chunks
+
+def _normalized_weight(w: float | None, clamp: bool = True) -> float:
+    """Normalize/clamp a weighting factor to a practical range."""
+    if w is None:
+        return 1.0
+    if not clamp:
+        return float(w)
+    return max(1.0, min(5.0, float(w)))
+
+
+def _apply_title_weighting(text: str, cfg: TitleConfig) -> tuple[str, bool]:
+    """
+    Prepend (replicate) the title to the body text to increase its impact on extraction.
+    This is model-agnostic and works regardless of vectorizer/tokenizer details.
+    """
+    if not cfg or not cfg.text:
+        return text, False
+
+    weight = _normalized_weight(cfg.weight, clamp=cfg.normalize)
+    repeats = max(1, ceil(weight))
+    boosted = ((cfg.text.strip() + "\n") * repeats) + text
+    return boosted, True
+
+
+def _default_params_for(tt: TextType) -> BaseExtractionParams:
+    """Provide reasonable default hyperparameters per text type."""
+    if tt == TextType.ARTICLE:
+        return ArticleExtractionParams()
+    if tt == TextType.SCIENTIFIC_PAPER:
+        return ScientificPaperExtractionParams()
+    if tt == TextType.BLOG_POST:
+        return BlogPostExtractionParams()
+    return BaseExtractionParams()
+
+
+def _resolve_stop_words(language: str, params: BaseExtractionParams | None) -> Any:
+    """
+    Resolve stop words based on language and explicit params.
+    Returns either a string recognized by the underlying library (e.g., 'english')
+    or a list of stopwords if provided via params; otherwise None.
+    """
+    if params and params.stop_words:
+        return params.stop_words
+
+    lang = (language or "").lower()
+    if lang.startswith("de"):
+        return "german"
+    if lang.startswith("en") or lang == "auto":
+        return "english"
+    return None
+
+
+def _keyword_appears_in_title(keyword: str, title: str) -> bool:
+    return keyword.lower() in title.lower()
+
+
+# --------------------------- backend adapter ----------------------------------
+
+
+@dataclass
+class _KeyBERTBackend:
+    """
+    Minimal adapter for the underlying extraction backend (e.g., keybert.KeyBERT).
+
+    Expected callable (varies by version!):
+      extract_keywords(
+         doc: str,
+         keyphrase_ngram_range: tuple[int, int],
+         stop_words: Any,
+         top_n: int,
+         use_mmr: bool,
+         diversity: float,
+         # some versions: use_maxsum: bool, nr_candidates: int, ...
+      ) -> list[tuple[str, float]]
+    """
+    kb: Any
+
+    def extract_keywords(
+        self,
+        doc: str,
+        *,
+        keyphrase_ngram_range: tuple[int, int],
+        stop_words: Any,
+        use_mmr: bool,
+        diversity: float,
+        top_n: int,
+        maxsum: bool | None = None,   # internal alias (may become use_maxsum)
+        min_df: int | None = None,    # often unsupported by KeyBERT -> will be dropped
+    ) -> list[tuple[str, float]]:
+        """
+        Build a kwargs dict that only contains parameters supported by the installed
+        KeyBERT version. Map `maxsum` -> `use_maxsum` when available.
+        """
+        # Base kwargs used across versions
+        kwargs: Dict[str, Any] = {
+            "keyphrase_ngram_range": keyphrase_ngram_range,
+            "stop_words": stop_words,
+            "top_n": top_n,
+            "use_mmr": use_mmr,
+            "diversity": diversity,
+        }
+
+        # Inspect the backend signature to filter/alias optional params
+        sig = inspect.signature(self.kb.extract_keywords)
+        params = sig.parameters
+
+        # Some versions expose `use_maxsum` instead of `maxsum`
+        if maxsum is not None:
+            if "use_maxsum" in params:
+                kwargs["use_maxsum"] = bool(maxsum)
+            elif "maxsum" in params:
+                # very rare, but just in case
+                kwargs["maxsum"] = bool(maxsum)
+            # else: the backend doesn't support this flag -> ignore
+
+        # `min_df` is typically not part of KeyBERT's extract_keywords signature;
+        # if your backend wrapper accepts it, we forward it, otherwise drop it silently.
+        if min_df is not None and "min_df" in params:
+            kwargs["min_df"] = min_df
+
+        # Finally, call the backend with the filtered kwargs
+        return self.kb.extract_keywords(doc, **kwargs)
+
+
+# ------------------------------ service ---------------------------------------
+
+
+class KeyBERTExtractionService:
+    """
+    Singleton-ish service with lifecycle hooks used by app.main:
+      - initialize(): load backend (model)
+      - is_initialized(): readiness check
+      - cleanup(): free resources
+      - extract(): run a single extraction
+    """
+
+    def __init__(self) -> None:
+        self._backend: _KeyBERTBackend | None = None
+        self._lock = asyncio.Lock()
 
     async def initialize(self) -> None:
-        """Load models asynchronously"""
-        if self._initialized:
-            logger.info("KeyBERT already initialized")
-            return
+        """
+        Initialize the underlying KeyBERT backend exactly once.
+        Thread/async-safe via lock.
+        """
+        async with self._lock:
+            if self._backend is not None:
+                return
 
-        try:
-            logger.info("Initializing Enhanced KeyBERT models...")
-            loop = asyncio.get_event_loop()
+            # Choose model from settings if available; otherwise default.
+            model_name: str = "all-MiniLM-L6-v2"
+            if get_settings:
+                try:
+                    settings = get_settings()
+                    model_name = getattr(settings, "keybert_model_name", model_name)
+                except Exception:
+                    pass
 
-            models = {
-                "de": settings.keybert_de_model,
-                "en": settings.keybert_en_model
-            }
+            # Lazy import to keep module import cheap and avoid hard dependency in tests
+            try:
+                from keybert import KeyBERT  # type: ignore
+            except Exception as e:
+                raise RuntimeError(
+                    "KeyBERT library is not installed or cannot be imported."
+                ) from e
 
-            for lang, model_name in models.items():
-                logger.info(f"Loading {lang} model: {model_name}")
+            try:
+                kb = KeyBERT(model=model_name)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to initialize KeyBERT backend with model '{model_name}': {e}"
+                ) from e
 
-                # Load transformer model
-                transformer = await loop.run_in_executor(
-                    self._executor,
-                    SentenceTransformer,
-                    model_name
-                )
-
-                # Store both for KeyBERT and sentence encoding
-                self._models[lang] = KeyBERT(model=transformer)
-                self._sentence_models[lang] = transformer
-
-                logger.info(f"✅ Loaded {lang} model: {model_name}")
-
-            self._initialized = True
-            logger.info("✅ All models loaded successfully")
-
-        except Exception as e:
-            logger.error(f"Failed to initialize: {e}", exc_info=True)
-            raise
+            self._backend = _KeyBERTBackend(kb=kb)
 
     def is_initialized(self) -> bool:
-        return self._initialized
-
-    def _split_into_sentences(self, text: str, language: str) -> List[str]:
-        """Split text into sentences"""
-        # Einfache Satztrennung (kann durch spaCy ersetzt werden für bessere Ergebnisse)
-        if language == "de":
-            # Deutsche Satztrennung
-            sentences = re.split(r'(?<=[.!?])\s+(?=[A-ZÄÖÜ])', text)
-        else:
-            # Englische Satztrennung
-            sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
-
-        # Filtere sehr kurze Sätze
-        sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
-        return sentences
-
-    def _create_chunks(self, text: str) -> List[str]:
-        """Split long text into overlapping chunks"""
-        chunks = []
-        text_length = len(text)
-
-        if text_length <= self.CHUNK_SIZE:
-            return [text]
-
-        for i in range(0, text_length, self.CHUNK_SIZE - self.CHUNK_OVERLAP):
-            chunk = text[i:i + self.CHUNK_SIZE]
-
-            # Versuche an Satzgrenzen zu schneiden
-            if i + self.CHUNK_SIZE < text_length:
-                # Finde letzten Punkt im Chunk
-                last_period = chunk.rfind('. ')
-                if last_period > self.CHUNK_SIZE * 0.8:  # Nur wenn nicht zu viel verloren geht
-                    chunk = chunk[:last_period + 1]
-
-            chunks.append(chunk)
-
-            if i + self.CHUNK_SIZE >= text_length:
-                break
-
-        logger.info(f"Created {len(chunks)} chunks from {text_length} chars")
-        return chunks
-
-    async def extract_keywords_from_long_text(
-            self,
-            text: str,
-            language: str = "de",
-            max_keywords: int = 20,
-            min_ngram: int = 1,
-            max_ngram: int = 3,
-            diversity: float = 0.7,
-            use_mmr: bool = True,
-            extract_sentences: bool = False,
-            num_sentences: int = 5
-    ) -> Dict[str, Any]:
-        """
-        Extract keywords from long text with chunking
-
-        Args:
-            text: Long input text (up to 500k chars)
-            language: Language code (de/en)
-            max_keywords: Maximum keywords to extract
-            min_ngram: Minimum n-gram size
-            max_ngram: Maximum n-gram size
-            diversity: Diversity for MMR (0-1)
-            use_mmr: Use Maximal Marginal Relevance
-            extract_sentences: Also extract key sentences
-            num_sentences: Number of key sentences to extract
-
-        Returns:
-            Dictionary with keywords and optionally key sentences
-        """
-
-        if not self._initialized:
-            raise ModelNotLoadedException("KeyBERT")
-
-        if language not in self._models:
-            raise UnsupportedLanguageException(language, list(self._models.keys()))
-
-        text_len = len(text.strip())
-        if text_len < 10:
-            raise TextTooShortException(text_len)
-        if text_len > self.MAX_TEXT_LENGTH:
-            raise TextTooLongException(text_len, self.MAX_TEXT_LENGTH)
-
-        logger.info(f"Processing long text: {text_len} chars, extract_sentences={extract_sentences}")
-
-        # Create chunks for very long texts
-        if text_len > self.CHUNK_SIZE:
-            chunks = self._create_chunks(text)
-        else:
-            chunks = [text]
-
-        # Extract keywords from each chunk
-        all_keywords = []
-        loop = asyncio.get_event_loop()
-
-        for i, chunk in enumerate(chunks):
-            logger.debug(f"Processing chunk {i+1}/{len(chunks)}")
-
-            chunk_keywords = await loop.run_in_executor(
-                self._executor,
-                self._extract_sync,
-                chunk, language, max_keywords,
-                (min_ngram, max_ngram), diversity, use_mmr
-            )
-
-            all_keywords.extend(chunk_keywords)
-
-        # Aggregate keywords from all chunks
-        keyword_scores = {}
-        for keyword, score in all_keywords:
-            if keyword in keyword_scores:
-                # Average the scores if keyword appears in multiple chunks
-                keyword_scores[keyword] = max(keyword_scores[keyword], score)
-            else:
-                keyword_scores[keyword] = score
-
-        # Sort and limit to max_keywords
-        sorted_keywords = sorted(keyword_scores.items(), key=lambda x: x[1], reverse=True)[:max_keywords]
-
-        # Format keywords
-        keywords = [
-            KeywordResult(
-                keyword=kw,
-                score=round(score, 4),
-                ngram_size=len(kw.split())
-            )
-            for kw, score in sorted_keywords
-        ]
-
-        result = {
-            "keywords": keywords,
-            "total_chunks": len(chunks),
-            "text_length": text_len
-        }
-
-        # Extract key sentences if requested
-        if extract_sentences:
-            sentences = self._split_into_sentences(text, language)
-            key_sentences = await self._extract_key_sentences(
-                sentences,
-                [kw.keyword for kw in keywords[:10]],  # Use top 10 keywords
-                language,
-                num_sentences
-            )
-            result["key_sentences"] = key_sentences
-
-        return result
-
-    async def _extract_key_sentences(
-            self,
-            sentences: List[str],
-            keywords: List[str],
-            language: str,
-            num_sentences: int = 5
-    ) -> List[Dict[str, Any]]:
-        """
-        Extract most relevant sentences based on keywords
-
-        Uses sentence embeddings to find sentences most similar to keywords
-        """
-        if not sentences or not keywords:
-            return []
-
-        loop = asyncio.get_event_loop()
-        model = self._sentence_models[language]
-
-        # Encode sentences and keywords
-        sentence_embeddings = await loop.run_in_executor(
-            self._executor,
-            model.encode,
-            sentences
-        )
-
-        keyword_text = " ".join(keywords)
-        keyword_embedding = await loop.run_in_executor(
-            self._executor,
-            model.encode,
-            [keyword_text]
-        )
-
-        # Calculate similarity
-        similarities = cosine_similarity(keyword_embedding, sentence_embeddings)[0]
-
-        # Get top sentences
-        top_indices = np.argsort(similarities)[-num_sentences:][::-1]
-
-        key_sentences = []
-        for idx in top_indices:
-            if idx < len(sentences):
-                key_sentences.append({
-                    "sentence": sentences[idx],
-                    "relevance_score": float(similarities[idx]),
-                    "position": idx,
-                    "keywords_found": [kw for kw in keywords if kw.lower() in sentences[idx].lower()]
-                })
-
-        return key_sentences
-
-    async def extract_keywords(
-            self,
-            text: str,
-            language: str = "de",
-            max_keywords: int = 10,
-            min_ngram: int = 1,
-            max_ngram: int = 2,
-            diversity: float = 0.5,
-            use_mmr: bool = True,
-            include_metadata: bool = False
-    ) -> Tuple[List[KeywordResult], Optional[ProcessingMetadata]]:
-        """Standard keyword extraction (backwards compatible)"""
-
-        # For long texts, use the enhanced method
-        if len(text) > self.CHUNK_SIZE:
-            result = await self.extract_keywords_from_long_text(
-                text, language, max_keywords,
-                min_ngram, max_ngram, diversity, use_mmr
-            )
-            keywords = result["keywords"]
-
-            metadata = None
-            if include_metadata:
-                metadata = ProcessingMetadata(
-                    processing_time_ms=0,
-                    model_used=settings.keybert_de_model if language == "de" else settings.keybert_en_model,
-                    total_tokens=len(text.split())
-                )
-
-            return keywords, metadata
-
-        # Original implementation for shorter texts
-        logger.info(f"Extracting keywords: lang={language}, text_len={len(text)}, max_kw={max_keywords}")
-
-        self._validate_input(text, language)
-
-        start_time = time.time()
-
-        loop = asyncio.get_event_loop()
-        keywords_tuples = await loop.run_in_executor(
-            self._executor,
-            self._extract_sync,
-            text, language, max_keywords,
-            (min_ngram, max_ngram), diversity, use_mmr
-        )
-
-        processing_time = (time.time() - start_time) * 1000
-
-        keywords = [
-            KeywordResult(
-                keyword=kw,
-                score=round(score, 4),
-                ngram_size=len(kw.split())
-            )
-            for kw, score in keywords_tuples
-        ]
-
-        metadata = None
-        if include_metadata:
-            metadata = ProcessingMetadata(
-                processing_time_ms=processing_time,
-                model_used=settings.keybert_de_model if language == "de" else settings.keybert_en_model,
-                total_tokens=len(text.split())
-            )
-
-        return keywords, metadata
-
-    def _validate_input(self, text: str, language: str) -> None:
-        """Validate extraction input"""
-        if not self._initialized:
-            raise ModelNotLoadedException("KeyBERT")
-
-        if language not in self._models:
-            raise UnsupportedLanguageException(
-                language, list(self._models.keys())
-            )
-
-        text_len = len(text.strip())
-        if text_len < 10:
-            raise TextTooShortException(text_len)
-        if text_len > self.MAX_TEXT_LENGTH:
-            raise TextTooLongException(text_len, self.MAX_TEXT_LENGTH)
-
-    def _extract_sync(
-            self,
-            text: str,
-            language: str,
-            max_keywords: int,
-            ngram_range: Tuple[int, int],
-            diversity: float,
-            use_mmr: bool
-    ) -> List[Tuple[str, float]]:
-        """Synchronous extraction for thread pool"""
-
-        model = self._models[language]
-        stop_words = "english" if language == "en" else None
-
-        try:
-            keywords = model.extract_keywords(
-                text,
-                keyphrase_ngram_range=ngram_range,
-                stop_words=stop_words,
-                top_n=max_keywords,
-                use_mmr=use_mmr,
-                diversity=diversity if use_mmr else 0.0,
-                nr_candidates=max_keywords * 5
-            )
-
-            return keywords
-
-        except Exception as e:
-            logger.error(f"Extraction failed: {e}", exc_info=True)
-            return []
-
-    async def get_service_info(self) -> Dict[str, Any]:
-        """Get service information"""
-        return {
-            "service_name": "Enhanced KeyBERT",
-            "version": "2.0.0",
-            "initialized": self._initialized,
-            "supported_languages": list(self._models.keys()),
-            "models_loaded": len(self._models),
-            "max_text_length": self.MAX_TEXT_LENGTH,
-            "chunk_size": self.CHUNK_SIZE,
-            "configuration": {
-                "device": settings.keybert_device,
-                "max_batch_size": settings.keybert_max_batch_size,
-                "de_model": settings.keybert_de_model if self._initialized else "not loaded",
-                "en_model": settings.keybert_en_model if self._initialized else "not loaded"
-            }
-        }
+        return self._backend is not None
 
     async def cleanup(self) -> None:
-        """Cleanup resources"""
-        self._models.clear()
-        self._sentence_models.clear()
-        self._executor.shutdown(wait=True)
-        self._initialized = False
+        """
+        Release backend resources if needed. KeyBERT itself does not strictly need cleanup,
+        but this method keeps the lifecycle consistent.
+        """
+        async with self._lock:
+            self._backend = None
+
+    # ----------------------------- core API -----------------------------------
+
+    def extract(self, req: KeywordExtractionRequest) -> KeywordExtractionResponse:
+        if self._backend is None:
+            raise RuntimeError("KeyBERT service is not initialized.")
+
+        t0 = perf_counter()
+
+        # 1) Apply title weighting
+        composite_text, title_applied = _apply_title_weighting(req.text, req.title_config)
+
+        # 2) Merge params (request.params overrides defaults by text_type)
+        params: BaseExtractionParams = req.params or _default_params_for(req.text_type)
+
+        # Prefer params.top_n if params provided; else fall back to request.max_keywords
+        effective_top_n = params.top_n if req.params else req.max_keywords
+
+        # ngram range precedence: params if provided, else request's (min_ngram, max_ngram)
+        if req.params:
+            ngram_range: Tuple[int, int] = params.ngram_range
+        else:
+            ngram_range = req.ngram_range
+
+        stop_words = _resolve_stop_words(req.language, params)
+
+        # 3) Call backend (with arg-filtering inside the adapter)
+        raw: List[tuple[str, float]] = self._backend.extract_keywords(  # type: ignore[union-attr]
+            composite_text,
+            keyphrase_ngram_range=ngram_range,
+            stop_words=stop_words,
+            use_mmr=params.use_mmr,
+            diversity=params.diversity,
+            top_n=effective_top_n,
+            maxsum=params.maxsum,
+            min_df=params.min_df,
+        )
+
+        # 4) Optional rescoring: small boost for keywords present in the title
+        keywords: List[KeywordResult] = []
+        for kw, score in raw:
+            adj = float(score)
+            if title_applied and req.title_config.boost_in_scoring and req.title_config.text:
+                if _keyword_appears_in_title(kw, req.title_config.text):
+                    adj *= 1.10  # +10%
+            keywords.append(KeywordResult(keyword=kw, score=adj, ngram_size=len(kw.split())))
+
+        keywords.sort(key=lambda k: k.score, reverse=True)
+        keywords = keywords[:effective_top_n]
+
+        processing_time_ms = (perf_counter() - t0) * 1000.0
+        processing_metadata: Dict[str, Any] = {
+            "processing_time_ms": processing_time_ms,
+            "title_applied": title_applied,
+            "effective_top_n": effective_top_n,
+            "ngram_range": ngram_range,
+            "use_mmr": params.use_mmr,
+            "diversity": params.diversity,
+            # record what we *asked* for; actual backend may have ignored unknown keys
+            "requested_maxsum": params.maxsum,
+            "requested_min_df": params.min_df,
+            "stop_words": stop_words if isinstance(stop_words, str) else "custom" if stop_words else None,
+            "text_type": req.text_type.value,
+        }
+
+        return KeywordExtractionResponse(
+            keywords=keywords,
+            total_keywords_found=len(keywords),
+            text_length=len(req.text or ""),
+            language=req.language,
+            processing_metadata=processing_metadata if req.include_metadata else None,
+        )
 
 
-# Use enhanced service
-keybert_service = EnhancedKeyBERTService()
+# Expose a module-level singleton as expected by app.main
+keybert_service = KeyBERTExtractionService()

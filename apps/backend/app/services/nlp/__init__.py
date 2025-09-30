@@ -1,9 +1,8 @@
 """
-Natural Language Processing services
+NLP services package.
+
+Exports the KeyBERT singleton used by the application lifecycle and routers.
 """
+from .keybert_service import keybert_service, KeyBERTExtractionService
 
-from .keybert_service import keybert_service
-
-__all__ = [
-    "keybert_service"
-]
+__all__ = ["keybert_service", "KeyBERTExtractionService"]
