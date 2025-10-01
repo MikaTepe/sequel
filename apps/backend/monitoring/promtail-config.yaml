@@ -1,0 +1,46 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/promtail-positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+
+    relabel_configs:
+      # Pflichtlabel, verhindert 400er
+      - action: replace
+        target_label: job
+        replacement: docker
+
+      # service = Compose-Service-Name, falls vorhanden
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+
+      # Fallback: service = Container-Name (ohne führenden Slash)
+      - source_labels: [__meta_docker_container_name]
+        regex: "/?(.*)"
+        target_label: service
+
+      # >>> NEU: für Drilldown-Plugin – service_name wie service setzen
+      - source_labels: [service]
+        target_label: service_name
+
+      # (optional) ein paar Standard-Labels
+      - source_labels: [__meta_docker_container_id]
+        target_label: container_id
+      - source_labels: [__meta_docker_container_image]
+        target_label: image
+      - source_labels: [__meta_docker_container_name]
+        regex: "/?(.*)"
+        target_label: container
+
+    pipeline_stages:
+      - docker: {}

@@ -1,0 +1,49 @@
+name: monitoring
+
+services:
+  loki:
+    image: grafana/loki:2.9.6
+    command: -config.file=/etc/loki/config/loki-config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki-config.yaml:/etc/loki/config/loki-config.yaml:ro
+      - loki-data:/loki
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3100/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+
+      - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=grafana-exploretraces-app,grafana-metricsdrilldown-app
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      loki:
+        condition: service_healthy
+
+  promtail:
+    image: grafana/promtail:2.9.6
+    command: -config.file=/etc/promtail/config/promtail-config.yaml
+    ports:
+      - "9080:9080"   # optional: Promtail HTTP-API für Debug (config/targets/metrics)
+    volumes:
+      - ./promtail-config.yaml:/etc/promtail/config/promtail-config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # Docker SD
+      - ./logs:/var/log/app:ro                         # optionale Datei-Logs
+    depends_on:
+      loki:
+        condition: service_healthy
+
+volumes:
+  grafana-data:
+  loki-data:

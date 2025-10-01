@@ -1,0 +1,10 @@
+name: microservices
+
+services:
+  testlogger:
+    build: ./services/testlogger
+    container_name: testlogger
+    labels:
+      service: testlogger     # <— wichtig für Override
+      log.env: dev            # optional weitere (mit Punkt sind ok, aber nicht auto-gemappt)
+      log.component: demo
