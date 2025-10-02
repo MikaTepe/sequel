@@ -1,10 +1,143 @@
-name: microservices
+version: '3.8'
+
+networks:
+  sequel-network:
+    driver: bridge
+
+volumes:
+  loki-data:
+  grafana-data:
 
 services:
-  testlogger:
-    build: ./services/testlogger
-    container_name: testlogger
+  # ==========================================================================
+  # API GATEWAY
+  # ==========================================================================
+  gateway:
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
+    container_name: sequel-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_NAME=Sequel API Gateway
+      - DEBUG=true
+      - HOST=0.0.0.0
+      - PORT=8000
+      - LOG_LEVEL=INFO
+      - KEYWORD_EXTRACTION_URL=http://keyword-extraction:8001
+      - CORS_ORIGINS=["http://localhost:3000"]
     labels:
-      service: testlogger     # <— wichtig für Override
-      log.env: dev            # optional weitere (mit Punkt sind ok, aber nicht auto-gemappt)
-      log.component: demo
+      service: gateway
+      log.env: production
+    networks:
+      - sequel-network
+    depends_on:
+      - keyword-extraction
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # ==========================================================================
+  # KEYWORD EXTRACTION SERVICE
+  # ==========================================================================
+  keyword-extraction:
+    build:
+      context: .
+      dockerfile: apps/services/keyword-extraction/Dockerfile
+    container_name: sequel-keyword-extraction
+    expose:
+      - "8001"
+    environment:
+      - SERVICE_NAME=keyword-extraction
+      - DEBUG=true
+      - HOST=0.0.0.0
+      - PORT=8001
+      - LOG_LEVEL=INFO
+      - KEYBERT_DEVICE=cpu
+      - KEYBERT_MODEL=all-MiniLM-L6-v2
+    labels:
+      service: keyword-extraction
+      log.env: production
+    networks:
+      - sequel-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+
+  # ==========================================================================
+  # MONITORING - LOKI
+  # ==========================================================================
+  loki:
+    image: grafana/loki:2.9.6
+    container_name: sequel-loki
+    command: -config.file=/etc/loki/config/loki-config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./monitoring/loki-config.yaml:/etc/loki/config/loki-config.yaml:ro
+      - loki-data:/loki
+    networks:
+      - sequel-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ==========================================================================
+  # MONITORING - GRAFANA
+  # ==========================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: sequel-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=grafana-exploretraces-app
+    volumes:
+      - ./monitoring/provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+    networks:
+      - sequel-network
+    depends_on:
+      loki:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ==========================================================================
+  # MONITORING - PROMTAIL
+  # ==========================================================================
+  promtail:
+    image: grafana/promtail:2.9.6
+    container_name: sequel-promtail
+    command: -config.file=/etc/promtail/config/promtail-config.yaml
+    ports:
+      - "9080:9080"
+    volumes:
+      - ./monitoring/promtail-config.yaml:/etc/promtail/config/promtail-config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - sequel-network
+    depends_on:
+      loki:
+        condition: service_healthy
+    restart: unless-stopped

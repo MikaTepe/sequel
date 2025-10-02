@@ -1,0 +1,14 @@
+[tool.poetry]
+name = "sequel-shared"
+version = "0.1.0"
+description = "Shared libraries for Sequel microservices"
+authors = ["Mika Tepe <mika.tepe@yahoo.de>"]
+
+[tool.poetry.dependencies]
+python = "^3.13"
+pydantic = "^2.11.9"
+pydantic-settings = "^2.1.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
