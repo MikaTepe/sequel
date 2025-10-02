@@ -15,12 +15,16 @@ scrape_configs:
         refresh_interval: 5s
 
     relabel_configs:
-      # Pflichtlabel, verhindert 400er
+      - source_labels: [__meta_docker_container_label_logging]
+        regex: enabled
+        action: keep
+
+      # Pflichtlabel, verhindert 400er in Loki
       - action: replace
         target_label: job
         replacement: docker
 
-      # service = Compose-Service-Name, falls vorhanden
+      # Compose-Service-Name (falls vorhanden)
       - source_labels: [__meta_docker_container_label_com_docker_compose_service]
         target_label: service
 
@@ -29,11 +33,13 @@ scrape_configs:
         regex: "/?(.*)"
         target_label: service
 
-      # >>> NEU: für Drilldown-Plugin – service_name wie service setzen
+      # Praktisch für Drilldown/Explore
       - source_labels: [service]
         target_label: service_name
 
-      # (optional) ein paar Standard-Labels
+      # Nützliche Labels
+      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
+        target_label: project
       - source_labels: [__meta_docker_container_id]
         target_label: container_id
       - source_labels: [__meta_docker_container_image]

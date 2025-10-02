@@ -1,4 +1,4 @@
-name: sequel-backend
+name: sequel-backend-dev
 
 networks:
   sequel-network:
@@ -13,7 +13,7 @@ services:
     build:
       context: .
       dockerfile: gateway/app/Dockerfile
-    env_file: .env.prod
+    env_file: .env
     ports:
       - "8000:8000"
     networks: [sequel-network]
@@ -27,9 +27,9 @@ services:
     build:
       context: .
       dockerfile: services/keyword-extraction/Dockerfile
-    env_file: .env.prod
-    expose:
-      - "8001"         # nur intern erreichbar (via Gateway)
+    env_file: .env
+    ports:
+      - "8001:8001"     # in DEV offen für direkte Tests (Swagger, Curl)
     networks: [sequel-network]
     labels:
       logging: "enabled"
@@ -49,7 +49,7 @@ services:
 
   grafana:
     image: grafana/grafana:latest
-    env_file: .env.prod
+    env_file: .env
     ports:
       - "3000:3000"
     volumes:

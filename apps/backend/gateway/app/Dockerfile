@@ -1,36 +1,26 @@
-FROM python:3.13
+FROM python:3.13-slim
 
-ENV PYTHONUNBUFFERED=1 \
-    POETRY_VERSION=1.8.3 \
-    POETRY_HOME=/opt/poetry \
-    POETRY_NO_INTERACTION=1
+ENV PYTHONUNBUFFERED=1
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl && \
-    curl -sSL https://install.python-poetry.org | python - && \
-    ln -s /opt/poetry/bin/poetry /usr/local/bin/poetry && \
-    apt-get purge -y curl && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+# Install dependencies
+RUN pip install --no-cache-dir \
+    fastapi==0.117.1 \
+    uvicorn[standard]==0.37.0 \
+    pydantic==2.11.9 \
+    pydantic-settings==2.1.0 \
+    httpx==0.27.0
 
-WORKDIR /app
+# Set root as workdir
+WORKDIR /
 
-# Copy shared dependencies
-COPY shared/ /shared/
+# Copy shared to /shared
+COPY shared /shared
 
-# Install shared package
-WORKDIR /shared
-RUN poetry config virtualenvs.create false && \
-    poetry install --no-root --only main
+# Copy gateway code to /app
+COPY gateway/app /app
 
-# Install gateway dependencies
-WORKDIR /app
-COPY apps/gateway/pyproject.toml apps/gateway/poetry.lock* ./
-RUN poetry config virtualenvs.create false && \
-     poetry install --no-root --only main
-
-# Copy application code
-COPY apps/gateway/app ./app
+# Set PYTHONPATH
+ENV PYTHONPATH=/:/shared
 
 EXPOSE 8000
 

@@ -1,35 +1,26 @@
-FROM python:3.13
+FROM python:3.13-slim
 
-ENV PYTHONUNBUFFERED=1 \
-    POETRY_VERSION=1.8.3 \
-    POETRY_HOME=/opt/poetry \
-    POETRY_NO_INTERACTION=1
+ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl build-essential && \
-    curl -sSL https://install.python-poetry.org | python - && \
-    ln -s /opt/poetry/bin/poetry /usr/local/bin/poetry && \
-    apt-get purge -y curl && \
-    apt-get clean && \
+    apt-get install -y --no-install-recommends build-essential && \
     rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+RUN pip install --no-cache-dir \
+    fastapi==0.117.1 \
+    uvicorn[standard]==0.37.0 \
+    pydantic==2.11.9 \
+    pydantic-settings==2.1.0 \
+    keybert==0.9.0 \
+    sentence-transformers==5.1.1 \
+    scikit-learn==1.5.2
 
-# Copy and install shared dependencies
-COPY shared/ /shared/
-WORKDIR /shared
-RUN poetry config virtualenvs.create false && \
-    poetry install --no-root --only main
+WORKDIR /
 
-# Install service dependencies
-WORKDIR /app
-COPY apps/services/keyword-extraction/pyproject.toml ./
-COPY apps/services/keyword-extraction/poetry.lock* ./
-RUN poetry config virtualenvs.create false && \
-    poetry install --no-root --only main
+COPY shared /shared
+COPY services/keyword-extraction/app /app
 
-# Copy application code
-COPY apps/services/keyword-extraction/app ./app
+ENV PYTHONPATH=/:/shared
 
 EXPOSE 8001
 

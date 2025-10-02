@@ -27,7 +27,7 @@ class ServiceRegistry:
                 "name": "Keyword Extraction Service",
                 "url": settings.keyword_extraction_url,
                 "health": f"{settings.keyword_extraction_url}/health",
-                "prefix": "/v1/nlp/keybert",
+                "prefix": "/keybert",
             }
         }
 

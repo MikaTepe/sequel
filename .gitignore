@@ -157,7 +157,7 @@ share/python-wheels/
 MANIFEST
 
 # Virtual environments
-.env
+apps/backend/.env
 .venv
 env/
 venv/
@@ -223,6 +223,8 @@ celerybeat.pid
 
 # dotenv
 *.env
+*.env.prod
+*.env.dev
 
 # mypy
 .mypy_cache/

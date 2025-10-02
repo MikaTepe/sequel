@@ -1,5 +1,3 @@
-"""Service configuration"""
-
 from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -17,11 +15,8 @@ class Settings(BaseSettings):
     port: int = Field(default=8001, env="PORT")
 
     # KeyBERT
-    keybert_device: str = Field(default="cpu", env="KEYBERT_DEVICE")
-    keybert_model: str = Field(
-        default="all-MiniLM-L6-v2",
-        env="KEYBERT_MODEL"
-    )
+    keybert_device: str = Field(default="cpu", env="KEYBERT_DEVICE")  # "cpu" | "cuda"
+    keybert_model: str = Field(default="all-MiniLM-L6-v2", env="KEYBERT_MODEL")
     keybert_cache_ttl: int = Field(default=3600, env="KEYBERT_CACHE_TTL")
 
     # Logging
@@ -34,6 +29,3 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     return Settings()
-
-
-settings = get_settings()
